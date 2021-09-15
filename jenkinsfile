@@ -1,220 +1,51 @@
 pipeline {
-    parameters {
-        text(name: 'PROPS', defaultValue:'test', description: 'Props version to deploy')
-        text(name: 'PROPSBRANCH', defaultValue:'trunk', description: 'Props branch to checkout')
-        text(name: 'BRANCH', defaultValue:'E-01425', description: 'Branch to build')
-        text(name: 'MIRELEASE', defaultValue:'test-punchout', description: 'Tag to display in application')
-        booleanParam(name: 'DEPLOY_UI', defaultValue: true, description: 'Check to Deploy UI, Uncheck to build only')
-        booleanParam(name: 'DEPLOY_SVC', defaultValue: true, description: 'Check to Deploy SVC, Uncheck to build only')
-    }
-
     agent any
 
-    tools {
-        maven "Maven_3.5.4"
-        nodejs "NodeJS_14.16.0"
-        jdk "jdk1.8.0_181"
-    }
-
-    stages {
-     stage('Checkout props') {
-            steps {
-                checkout([$class: 'SubversionSCM', 
-                  filterChangelog: false, 
-                  ignoreDirPropChanges: false, 
-                  includedRegions: '', 
-                  locations: [[credentialsId: '15fd3cbe-5b03-43da-b294-9eecb577b1da',
-                               depthOption: 'infinity', 
-                               ignoreExternalsOption: true, 
-                               local: 'props', 
-                               remote: "https://teamforge.corp.motion-ind.com/svn/repos/motionsvn/props/trunk/props"]], 
-                  workspaceUpdater: [$class: 'UpdateUpdater']])
-            }
-        }
-        
-        stage('Checkout micom') {
-            steps {
-                sh "git init" //this will be okay if the git repo is alrady initialized
-                sh "git config http.sslVerify false"
+	stages {
+	
+    	stage('Checkout Test Automation from GIT') {
+    		steps {
+        		bat "git init" //this is ok if the git repo is already initialized
+	            bat "git config http.sslVerify false"
                 
-                git branch: params.BRANCH,
-                    credentialsId: '15fd3cbe-5b03-43da-b294-9eecb577b1da',
-                    url: 'https://al007240@teamforge.corp.motion-ind.com/gerrit/micom'
-            }
-        }
-        
-        stage('Install UI') {
+    	     	git branch: 'development',
+                	url: 'ssh://al004100@teamforge.corp.motion-ind.com:29418/test-automation'
+	 		}
+		}
+
+        stage('Copy VariablePayRegressionTests_QAT.properties.properties and rename to config.properties') {
             steps {
-                dir("ui") {
-                    sh "npm ci"
+                dir ("Motion.API.TestExecution/src/main/resources") {
+                    fileOperations([fileDeleteOperation(includes: 'config.properties', excludes: '')])
+                    fileOperations([fileRenameOperation(source: 'VariablePayRegressionTests_QAT.properties', destination: 'config.properties')])
                 }
             }
+        }    
+
+		stage('Maven Compile Test Install Motion.API.TestExecution project execute Profile "VariablePayRegressionTests"') {
+			steps {
+				dir("Motion.API.TestExecution") {
+				bat "mvn compile test -P VariablePayRegressionTests"
+				}
+    		}
+		}
+	
+	}
+	
+// always, changed, fixed, regression, aborted, success, unsuccessful, unstable, failure, notBuilt, cleanup
+	post {
+//	    always {
+//	        powershell 'Set-DisplayResolution -Width 1920 -Height 1080 -Force'
+//	    }
+        failure {
+            slackSend color: "danger", message: "Job: ${env.JOB_NAME} with buildnumber ${env.BUILD_NUMBER} failed.  Runtime: ${currentBuild.durationString.minus(' and counting')}"
         }
-        
-        // stage('Test UI') {
-        //     steps {
-        //         dir("ui") {
-        //             sh "npm run test"
-        //         }
-        //     }
-            
-        //     post {
-        //         always {
-        //             cobertura coberturaReportFile: 'ui/test-results/cobertura-coverage.xml'
-        //             junit 'ui/test-results/junit.xml'
-        //         }
-        //     }          
-        // }
-        
-        stage('Build UI') {
-            steps {
-                dir("ui") {
-                    dir('dist') {
-                        deleteDir() //clean build output
-                    }
-                    
-                    sh """sed -i -e "s/'[^']'/'${params.MIRELEASE}-${env.BUILD_NUMBER}'/g" "src/version.ts" """
-                    sh "npm run build:ssr:prod"
-                    
-                    sh '''
-                    #Clear the automatic settings/environment files to make sure the wrong version doesn't get deployed
-                    rm -rf "dist/browser/settings/settings.json"
-                    rm -rf "dist/browser/environments/environment.json"'''
-
-                    micomUiCopy('oci','oci','dev','4012')
-                }
-            }
+        fixed {
+            slackSend color: "good", message: "Job: ${env.JOB_NAME} with buildnumber ${env.BUILD_NUMBER} was the first success after failure. Runtime: ${currentBuild.durationString.minus(' and counting')}"
         }
-
-        stage('Build SVC') {
-            steps {
-                dir("svc") {
-                    dir('target') {
-                        deleteDir() //clean build output
-                    }
-                    
-                    // use the deployed web.xml instead (includes things like jdbc pooling)
-                    sh "rm -rf /src/main/webapp/WEB-INF/web.xml"
-                    sh "cp src/main/webapp/WEB-INF/misvc_web.xml src/main/webapp/WEB-INF/web.xml"
-
-                    sh "mvn clean -U package -DpropsPath=../props/${params.PROPS} -DApplication=misvc -Dmaven.test.failure.ignore=true -DBuildNumber=${env.BUILD_NUMBER} -DReleaseNumber=${params.MIRELEASE} -Dfile.encoding=CP1252"
-                    
-                    dir('target') { //store build output for svc build
-                        stash name: "war", includes: "*.war"
-                    }
-                }
-            }
-
-            post {
-                always {
-                    junit '**/target/surefire-reports/TEST-*.xml'
-                    step( [ $class: 'JacocoPublisher' ] )
-                    archiveArtifacts 'svc/target/*.war'
-                }
-            }
-        } 
-
-        stage('Deploy UI') {
-            when { expression { return params.DEPLOY_UI } }
-            steps {
-                dir("ui") {
-                    dir('oci') {
-                        unstash 'oci-build-output'
-                    }
-
-                    sshPublisher(publishers: [
-                        sshPublisherDesc(
-                            configName: 'BLMOTDVNODEJS01', 
-                            transfers: [
-                                sshTransfer(
-                                    excludes: '', 
-                                    execCommand: 'pm2 reload server-oci', 
-                                    execTimeout: 120000, 
-                                    flatten: false, 
-                                    makeEmptyDirs: false, 
-                                    noDefaultExcludes: false, 
-                                    patternSeparator: '[, ]+', 
-                                    remoteDirectory: '', 
-                                    remoteDirectorySDF: false, 
-                                    removePrefix: '', 
-                                    sourceFiles: 'oci/**')
-                            ], 
-                            usePromotionTimestamp: false, 
-                            useWorkspaceInPromotion: false, 
-                            verbose: false
-                        )
-                    ])
-                    sshPublisher(publishers: [
-                        sshPublisherDesc(
-                            configName: 'BLMOTDVNODEJS02', 
-                            transfers: [
-                                sshTransfer(
-                                    excludes: '', 
-                                    execCommand: 'pm2 reload server-oci', 
-                                    execTimeout: 120000, 
-                                    flatten: false, 
-                                    makeEmptyDirs: false, 
-                                    noDefaultExcludes: false, 
-                                    patternSeparator: '[, ]+', 
-                                    remoteDirectory: '', 
-                                    remoteDirectorySDF: false, 
-                                    removePrefix: '', 
-                                    sourceFiles: 'oci/**')
-                            ], 
-                            usePromotionTimestamp: false, 
-                            useWorkspaceInPromotion: false, 
-                            verbose: false
-                        )
-                    ])
-                }
-            }
-        }
-        
-        stage('Deploy SVC') {
-            when { expression { return params.DEPLOY_SVC } }
-            parallel {
-                stage('Deploy midev02punchoutV9') {
-                    steps {
-                        devWarDeploy('midev02punchoutV9','midev02punchoutV9','BLMOTDVMIWEB02Node01','svc/target/misvc.war')
-                    }
-                }
-            }
+        unstable {
+            slackSend color: "warning", message: "Job: ${env.JOB_NAME} with buildnumber ${env.BUILD_NUMBER} was unstable. Runtime: ${currentBuild.durationString.minus(' and counting')}"
         }
     }
-}
 
-/** deploy to a dev WAS server */
-def devWarDeploy(appname, servername, nodename, warpath) {
-    withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId:'3cf1c038-2ffc-49a7-84d8-5efe68e4b38e', usernameVariable: 'Username', passwordVariable: 'Password']]) {
-        sh """set +x
-            echo " ################################################################################ "
-            echo \$(date +"[%F-%T]") " Deploying ${warpath} as ${appname} to ${servername} on ${nodename} "
-            /data/thinclientlinux/thinclient.sh -host 10.0.102.24 -port 8879 -userName $Username -password $Password -f props/DeployScripts/WSAdmin_Install_Scripts/justDeploy.py ${warpath} ${appname} ${servername} ${nodename}
-            echo \$(date +"[%F-%T]") " The ${servername} server is open for e-business "
-            echo " ################################################################################ " """
-    }
-}
-
-def micomUiCopy(artifact, type, env, port) {
-    // artifact = folder/name to store output under
-    // type = mi, mc, oci
-    // env = dev, qual, prod
-    // port = port to assign to server
-    dir(artifact) {
-        deleteDir() //clean build output
-    }
-    echo "Transforming dist to $type for $env (port $port)"
-      
-    sh """
-        rsync -r "dist" "${artifact}"
-        rsync -r "src/settings/${env}/${type}/settings.json" "${artifact}/dist/browser/settings/settings.json"
-        rsync -r "src/environments/${env}/${type}/environment.json" "${artifact}/dist/browser/environments/environment.json"
-        rsync -r "${artifact}/dist/server/server.js" "${artifact}/dist/server-${type}.js"
-        rm -rf "${artifact}/dist/server"
-        sed -i -e "s/var PORT = process.env.PORT || 4000/var PORT = process.env.PORT || ${port}/g" "${artifact}/dist/server-${type}.js"
-        """
-        
-    dir(artifact) { //store build output for svc build
-        stash name: "$artifact-build-output"
-    }
 }
