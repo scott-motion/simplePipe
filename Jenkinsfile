@@ -17,7 +17,7 @@ pipeline {
                 echo 'Deploying....'
             }
         }
-        stage('Deployfeature') {
+        stage('Test SCM') {
             steps {
                 echo 'Deploying....'
             }
