@@ -17,7 +17,7 @@ pipeline {
                 echo 'Deploying....'
             }
         }
-        stage('Deploy dont trigger') {
+        stage('Deploy dont 123') {
             steps {
                 echo 'Deploying....'
             }
